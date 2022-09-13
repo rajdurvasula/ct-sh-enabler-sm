@@ -1,0 +1,506 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Template to enable SecurityHub on Member Accounts and send custom event
+Metadata:
+  AWS::CloudFormation::Interface:
+    - ParameterGroups:
+      - Label:
+          default: Organization Information
+        Parameters:
+          - OrganizationId
+      - Label:
+          default: Control Tower Information
+        Parameters:
+          - HomeRegion        
+          - SecurityAccountId
+          - RoleToAssume
+    - ParameterGroups:
+      - Label:
+          default: Code Source
+        Parameters:
+          - S3SourceBucket
+          - S3SourceKey1
+          - S3SourceKey2
+          - S3SourceKey3
+          - S3SourceKey4
+          - S3SourceKey5
+    - ParameterGroups:
+      - Label:
+          default: SecurityHub Configuration Options
+        Parameters:
+          - ComplianceFrequency
+          - AWSStandard
+          - CISStandard
+          - StateMachine
+    - ParameterGroups:
+      - Label:
+          default: SecurityHub Enabler Event
+        Parameters:
+          - EventBus
+Parameters:
+  OrganizationId:
+    Type: String
+    Description: AWS Organizations ID for the Control Tower
+    AllowedPattern: '^[o][\-][a-z0-9]{10}$'
+    ConstraintDescription: The Org Id must be a 12 character string starting with o- and followed by 10 lower case alphanumeric characters
+    MinLength: 12
+    MaxLength: 12
+    Default: 'o-a4tlobvmc0'
+  HomeRegion:
+    Type: String
+    Description: Control Tower Home Region
+    Default: 'us-east-1'
+  SecurityAccountId:
+    Type: String
+    Description: Which account will be the SecurityHub Admin account? Enter Account ID
+    AllowedPattern: '^[0-9]{12}$'
+    ConstraintDescription: The Security Account ID must be a 12 character string.
+    MinLength: 12
+    MaxLength: 12
+    Default: '413157014023'
+  RoleToAssume:
+    Type: String
+    Description: IAM role to be assumed in child accounts to enable SecurityHub. The default is AWSControlTowerExecution
+    Default: AWSControlTowerExecution
+  S3SourceBucket:
+    Type: String
+    Description: S3 bucket containing source code
+    Default: 'org-sh-ops'
+  S3SourceKey1:
+    Type: String
+    Description: S3 object key for Laucher
+    Default: 'sh_sm_launcher-3.zip'
+  S3SourceKey2:
+    Type: String
+    Description: S3 object key for Admin Enabler
+    Default: 'sh_admin_enabler-3.zip'
+  S3SourceKey3:
+    Type: String
+    Description: S3 object key for Member Enabler
+    Default: 'sh_member_enabler-3.zip'
+  S3SourceKey4:
+    Type: String
+    Description: S3 object key for Member Invite processing
+    Default: 'sh_member_invite-3.zip'
+  S3SourceKey5:
+    Type: String
+    Description: S3 object key for SecurityHub Enabler Events
+    Default: 'sh_enabler_event-3.zip'
+  S3SourceKey6:
+    Type: String
+    Description: S3 object key for SecurityHub Enabler Statemachine
+    Default: 'sh_enabler_sm_event-3.json'
+  ComplianceFrequency:
+    Type: Number
+    Description: Frequency (in days between 1 and 30, default is 7) to check organizational compliance
+    Default: 7
+    MinValue: 1
+    MaxValue: 30
+    ConstraintDescription: Compliance Frequency must be a number between 1 and 30, inclusive.
+  AWSStandard:
+    Type: String
+    Description: Should Security Hub enable the AWS Foundational Security Best Practices v1.0.0 Security Standard?
+    Default: 'yes'
+    AllowedValues:
+      - 'yes'
+      - 'no'
+  CISStandard:
+    Type: String
+    Description: Should Security Hub enable the CIS AWS Foundations Benchmark v1.2.0 Security Standard?
+    Default: 'yes'
+    AllowedValues:
+      - 'yes'
+      - 'no'
+  StateMachine:
+    Type: String
+    Description: SecurityHub Enabler StateMachine name
+    Default: 'SHEnablerSM'
+  EventBus:
+    Type: String
+    Description: Event Bus for SecurityHub Enabler events
+    Default: 'sh-event-bus'
+Conditions:
+  ComplianceFrequencySingleDay: !Equals
+    - !Ref ComplianceFrequency
+    - 1
+Resources:
+  SecurityHubEnablerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: '/'
+      Policies:
+        - PolicyName: SecurityHubEnablerPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - organizations:ListAccounts
+                  - organizations:DescribeAccount
+                  - organizations:ListPoliciesForTarget
+                  - organizations:ListParents
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    'aws:PrincipalOrgId': !Ref OrganizationId
+              - Effect: Allow
+                Action:
+                  - organizations:DescribeOrganizationalUnit
+                Resource:
+                  - !Sub 'arn:aws:organizations::${AWS::AccountId}:ou/${OrganizationId}/ou-*'
+              - Effect: Allow
+                Action:
+                  - sts:AssumeRole
+                Resource:
+                  - !Sub 'arn:aws:iam::*:role/${RoleToAssume}'
+                Condition:
+                  StringEquals:
+                    'aws:PrincipalOrgId': !Ref OrganizationId
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource:
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*'
+              - Effect: Allow
+                Action:
+                  - 'CloudFormation:ListStackInstances'
+                Resource:
+                  - !Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stackset/AWSControlTowerBP-BASELINE-CLOUDWATCH:*'
+              - Effect: Allow
+                Action:
+                  - 'iam:CreateServiceLinkedRole'
+                  - 'ec2:describeRegions'
+                  - 'securityhub:AcceptInvitation'
+                  - 'securityhub:AcceptAdministratorInvitation'
+                  - 'securityhub:BatchEnableStandards'
+                  - 'securityhub:BatchDisableStandards'
+                  - 'securityhub:CreateMembers'
+                  - 'securityhub:DisassociateFromAdministratorAccount'
+                  - 'securityhub:DisassociateMembers'
+                  - 'securityhub:DisableSecurityHub'
+                  - 'securityhub:DeleteMembers'
+                  - 'securityhub:EnableSecurityHub'
+                  - 'securityhub:GetEnabledStandards'
+                  - 'securityhub:GetFindings'
+                  - 'securityhub:GetMasterAccount'
+                  - 'securityhub:InviteMembers'
+                  - 'securityhub:ListInvitations'
+                  - 'securityhub:ListMembers'
+                Resource: '*'
+        - PolicyName: SHSMEventScopedPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'events:PutEvents'
+                Resource:
+                  - !Sub 'arn:aws:events:${AWS::Region}:${AWS::AccountId}:event-bus/${EventBus}'
+      Tags:
+        - Key: Purpose
+          Value: Role for Security Hub Enabler Lambdas
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W11
+            reason: 'Organizations does not have arns, so we have to use an asterisk in the policy'
+  SecurityHubAdminEnabler:
+    Type: AWS::Lambda::Function
+    UpdateReplacePolicy: Delete
+    DependsOn:
+      - SecurityHubEnablerRole
+    Properties:
+      Description: Enables SeurityHub service on Security Hub Master Account
+      FunctionName: SecurityHubAdminEnabler
+      Handler: 'sh_admin_enabler.lambda_handler'
+      Role: !Sub arn:aws:iam::${AWS::AccountId}:role/${SecurityHubEnablerRole}
+      Code:
+        S3Bucket: !Ref S3SourceBucket
+        S3Key: !Ref S3SourceKey2
+      Runtime: python3.8
+      MemorySize: 512
+      Timeout: 900
+      ReservedConcurrentExecutions: 2
+      Environment:
+        Variables:
+          log_level: INFO
+      Tags:
+        - Key: Purpose
+          Value: 'Lambda for Security Hub Admin-side actions'
+  SecurityHubMemberEnabler:
+    Type: AWS::Lambda::Function
+    UpdateReplacePolicy: Delete
+    DependsOn:
+      - SecurityHubEnablerRole
+    Properties:
+      Description: Enables SeurityHub service on Security Hub Member Account
+      FunctionName: SecurityHubMemberEnabler
+      Handler: 'sh_member_enabler.lambda_handler'
+      Role: !Sub arn:aws:iam::${AWS::AccountId}:role/${SecurityHubEnablerRole}
+      Code:
+        S3Bucket: !Ref S3SourceBucket
+        S3Key: !Ref S3SourceKey3
+      Runtime: python3.8
+      MemorySize: 512
+      Timeout: 900
+      ReservedConcurrentExecutions: 2
+      Environment:
+        Variables:
+          log_level: INFO
+      Tags:
+        - Key: Purpose
+          Value: 'Lambda for Security Hub Member-side actions'
+  SecurityHubMemberInvite:
+    Type: AWS::Lambda::Function
+    UpdateReplacePolicy: Delete
+    DependsOn:
+      - SecurityHubEnablerRole
+    Properties:
+      Description: Accepts SecurityHub Master Invite on Member Account
+      FunctionName: SecurityHubMemberInvite
+      Handler: 'sh_member_invite.lambda_handler'
+      Role: !Sub arn:aws:iam::${AWS::AccountId}:role/${SecurityHubEnablerRole}
+      Code:
+        S3Bucket: !Ref S3SourceBucket
+        S3Key: !Ref S3SourceKey4
+      Runtime: python3.8
+      MemorySize: 512
+      Timeout: 900
+      ReservedConcurrentExecutions: 2
+      Environment:
+        Variables:
+          log_level: INFO
+      Tags:
+        - Key: Purpose
+          Value: 'Lambda to accept Security Hub invite on Member'
+  SecurityHubEventSender:
+    Type: AWS::Lambda::Function
+    UpdateReplacePolicy: Delete
+    DependsOn:
+      - SecurityHubEnablerRole
+    Properties:
+      Description: Sends Event after enabling Security Hub on Account
+      FunctionName: SHEnablerEvent
+      Handler: 'sh_enabler_event.lambda_handler'
+      Role: !Sub arn:aws:iam::${AWS::AccountId}:role/${SecurityHubEnablerRole}
+      Code:
+        S3Bucket: !Ref S3SourceBucket
+        S3Key: !Ref S3SourceKey5
+      Runtime: python3.8
+      MemorySize: 512
+      Timeout: 60
+      Environment:
+        Variables:
+          log_level: INFO
+          event_bus: !Ref EventBus
+      Tags:
+        - Key: Purpose
+          Value: 'Lambda to send Event after Security Hub is enabled on Member Account'
+  SecurityHubSMLauncherRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - 'lambda.amazonaws.com'
+            Action:
+              - 'sts:AssumeRole'
+      Path: '/'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/AWSCloudFormationFullAccess'
+      Policies:
+        - PolicyName: SHSMLauncherPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sts:AssumeRole
+                Resource:
+                  - !Sub 'arn:aws:iam::*:role/${RoleToAssume}'
+                Condition:
+                  StringEquals:
+                    'aws:PrincipalOrgId': !Ref OrganizationId
+              - Effect: Allow
+                Action:
+                  - organizations:DescribeAccount
+                Resource:
+                  - !Sub 'arn:aws:organizations::${AWS::AccountId}:account/${OrganizationId}/*'
+              - Effect: Allow
+                Action:
+                  - 'states:DescribeStateMachineForExecution'
+                  - 'states:DescribeStateMachine'
+                  - 'states:UpdateStateMachine'
+                  - 'states:DeleteStateMachine'
+                  - 'states:StartExecution'
+                  - 'states:StopExecution'
+                  - 'states:StartSyncExecution'
+                Resource:
+                  - !Sub 'arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:*'
+                  - !Sub 'arn:aws:states:${AWS::Region}:${AWS::AccountId}:execution:*:*'
+              - Effect: Allow
+                Action:
+                  - 'states:ListStateMachines'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource:
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:*'
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:*:log-stream:*'
+      Tags:
+        - Key: Purpose
+          Value: Role for Lambda to launch Security Hub Enabler StateMachine
+  SecurityHubSMLauncher:
+    Type: AWS::Lambda::Function
+    UpdateReplacePolicy: Delete
+    DependsOn:
+      - SecurityHubAdminEnabler
+      - SecurityHubMemberEnabler
+      - SecurityHubMemberInvite
+      - SecurityHubSMLauncherRole
+    Properties:
+      Description: Launches SecurityHubEnabler State Machine
+      FunctionName: SecurityHubSMLauncher
+      Handler: 'sh_sm_launcher.lambda_handler'
+      Role: !Sub arn:aws:iam::${AWS::AccountId}:role/${SecurityHubSMLauncherRole}
+      Code:
+        S3Bucket: !Ref S3SourceBucket
+        S3Key: !Ref S3SourceKey1
+      Runtime: python3.8
+      MemorySize: 512
+      Timeout: 900
+      ReservedConcurrentExecutions: 2
+      Environment:
+        Variables:
+          log_level: INFO
+          org_id: !Ref OrganizationId
+          ct_home_region: !Ref HomeRegion
+          sh_admin_account: !Ref SecurityAccountId
+          assume_role: !Ref RoleToAssume
+          compliance_frequency: !Ref ComplianceFrequency
+          enable_aws_standard: !Ref AWSStandard
+          enable_cis_standard: !Ref CISStandard
+          sm_name: !Ref StateMachine
+      Tags:
+        - Key: Purpose
+          Value: Lambda to launch Security Hub Enabler StateMachine
+  SHEnablerSMExecRole:
+    Type: AWS::IAM::Role
+    DependsOn:
+      - SecurityHubAdminEnabler
+      - SecurityHubMemberEnabler
+      - SecurityHubMemberInvite
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - 'states.amazonaws.com'
+            Action:
+              - 'sts:AssumeRole'
+      Path: '/'
+      Policies:
+        - PolicyName: SHSMEventScopedPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'events:PutEvents'
+                Resource:
+                  - !Sub 'arn:aws:events:${AWS::Region}:${AWS::AccountId}:event-bus/${EventBus}'
+        - PolicyName: SHSMXRayAccessPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'xray:PutTraceSegments'
+                  - 'xray:PutTelemetryRecords'
+                  - 'xray:GetSamplingRules'
+                  - 'xray:GetSamplingTargets'
+                Resource:
+                  - '*'
+        - PolicyName: SHSMLauncherPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'lambda:InvokeFunction'
+                Resource:
+                  - !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:SecurityHubAdminEnabler:*'
+                  - !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:SecurityHubMemberEnabler:*'
+                  - !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:SecurityHubMemberInvite:*'
+                  - !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:SHEnablerEvent:*'
+              - Effect: Allow
+                Action:
+                  - 'lambda:InvokeFunction'
+                Resource:
+                  - !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:SecurityHubAdminEnabler'
+                  - !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:SecurityHubMemberEnabler'
+                  - !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:SecurityHubMemberInvite'
+                  - !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:SHEnablerEvent'
+      Tags:
+        - Key: Purpose
+          Value: Role for Security Hub Enabler StateMachine
+  SHEnablerSM:
+    Type: AWS::StepFunctions::StateMachine
+    DependsOn:
+      - SHEnablerSMExecRole
+    Properties:
+      StateMachineName: !Ref StateMachine
+      StateMachineType: 'STANDARD'
+      DefinitionS3Location:
+        Bucket: !Ref S3SourceBucket
+        Key: !Ref S3SourceKey6
+      RoleArn: !GetAtt SHEnablerSMExecRole.Arn
+      Tags:
+        - Key: Purpose
+          Value: Security Hub Enabler StateMachine
+  CTLifecycleRule:
+    Type: AWS::Events::Rule
+    DependsOn:
+      - SecurityHubSMLauncher
+    Properties:
+      Name: EventRuleForSHEnabler
+      Description: CT Lifecycle Event Trigger for SecurityHub Enabler
+      EventPattern:
+        source:
+          - 'aws.controltower'
+        detail-type:
+          - 'AWS Service Event via CloudTrail'
+        detail:
+          eventName:
+            - 'CreateManagedAccount'
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt SecurityHubSMLauncher.Arn
+          Id: SHEnabler
+  PermissionForCTEventToInvokeSHEnabler:
+    Type: AWS::Lambda::Permission
+    DependsOn:
+      - CTLifecycleRule
+    Properties:
+      FunctionName: !GetAtt SecurityHubSMLauncher.Arn
+      Action: 'lambda:InvokeFunction'
+      Principal: 'events.amazonaws.com'
+      SourceArn: !GetAtt CTLifecycleRule.Arn
